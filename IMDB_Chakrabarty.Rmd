@@ -1,0 +1,647 @@
+---
+title: "Shiny"
+author: "Debarati Chakrabarty"
+date: "07/10/2020"
+output: pdf_document
+runtime: shiny
+---
+    
+```{r setup, include=FALSE, warning=FALSE}
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(shiny, tidyverse, DT, leaflet, dplyr,MASS,  ggplot2,gbm,reshape,lubridate,data.table,e1071, caret,
+               ggcorrplot, tidyverse,arules, data.table, gains, leaps,mlbench,caret,plotly,shinycssloaders)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load Data
+```{r dataLoad and preprocess, warning=FALSE}
+movieIMDB5000 <- read_csv("movie_metadata.csv")
+str(movieIMDB5000)
+apply(movieIMDB5000,2,function(x) sum(is.na(x)))
+
+movieIMDB <- movieIMDB5000[ ,!names(movieIMDB5000) %in% "movie_imdb_link"]
+
+dim(movieIMDB)
+##The  highest budget
+highest_bud_mov<- movieIMDB5000[which.max(movieIMDB5000$budget),]
+print(highest_bud_mov$movie_title)
+print(highest_bud_mov$country)
+print(highest_bud_mov$title_year)
+print(highest_bud_mov$budget)
+```
+#This movie seems to have the budget in korean currency Won because in USD the budget is around 11 million
+# We will check another set of movies to check the currency units
+```{r data analysis ,warning=FALSE}
+movie_india <- movieIMDB5000[movieIMDB5000$country=="India", ]
+
+india_bud <- movie_india[, c("movie_title","budget")]
+
+head(na.omit(india_bud), 10)
+```
+#The movies here are not all in USD as some movies like Paa have budget of 150 million which is not the case(it is 4.6 mil according to https://www.the-numbers.com/).So this movie is represented in millions in INR.
+#In the case of Baahubali though the budget is represented in Crore in INR.
+
+Due to the nature of the data and there being no clear indication of which amount to process in millions or any other home currency unit, I am assuming all budgets and profits are in dollars. 
+### The profitability will be calculated on ROI i.e. profit over budget as percentage to avoid any conversion related discrepancies
+
+
+```{r dataPreprocessing, warning=FALSE}
+# converting in millions
+movieIMDB[, c("movie_title","gross", "budget")]
+movieIMDB$profit <- (movieIMDB$gross - movieIMDB$budget)/1000000
+movieIMDB$prft_pct_bdgt <- (movieIMDB$profit/(movieIMDB$budget/1000000)) *100
+movieIMDB$is_profit <- ifelse(movieIMDB$prft_pct_bdgt > 0 , 1, 0)
+movieIMDB$cntry_us <- ifelse(movieIMDB$country == "USA" ,"USA","Non-USA")
+```
+
+```{r country wise profit plot, warning=FALSE}
+
+movieIMDB.dt <- setDT(movieIMDB[movieIMDB$prft_pct_bdgt > 0, ])
+
+#Profit Percentage average plot
+data.for.plot1 <- movieIMDB.dt[, .(pct_proft_avg =  sum(prft_pct_bdgt)/ .N), keyby=cntry_us]
+#Gross average plot
+data.for.plot2 <- movieIMDB.dt[, .(gross_avg =  sum(gross/1000000)/ .N), keyby=cntry_us]
+#Profit average plot
+data.for.plot3 <- movieIMDB.dt[, .(profit_avg =  sum(profit/1000000)/ .N), keyby=cntry_us]
+
+#Gross plot country wise
+plt1 <- ggplot(na.exclude(movieIMDB.dt))+
+  geom_bar(aes(x=country, y = gross/1000000,fill = cntry_us), stat = "identity", width = 0.4 
+  ) +
+  ylab("USD in millions") + xlab("")+
+  ggtitle("Gross earning in millions")+
+   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1))+
+  labs(fill = "Country")
+
+#Profit country wise
+plt2 <- ggplot(na.exclude(movieIMDB.dt))+
+  geom_bar(aes(x=country, y = profit/1000000,fill = cntry_us), stat = "identity", width = 0.4 
+  ) +
+  ylab("USD in millions") + xlab("")+
+  ggtitle("Profit in millions")+
+   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1))+
+  labs(fill = "Country")
+#Profit percentage country wise
+plt3 <- ggplot(na.exclude(movieIMDB.dt))+
+  geom_bar(aes(x=country, y = prft_pct_bdgt,fill = cntry_us), stat = "identity", width = 0.4 
+  ) +
+  ylab("Profit%") + xlab("")+
+  ggtitle("ROI - profit as %budget")+
+   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1))+
+  labs(fill = "Country")
+
+#US and NON USA - Gross average
+plt4 <- ggplot(na.exclude(data.for.plot2))+
+  geom_bar(aes(x=cntry_us, y = gross_avg, fill = cntry_us), stat = "identity", width = 0.4 ) +
+  ylab("USD in millions") + xlab("")+
+  ggtitle("Average gross earning by country")+
+  labs(fill = "Country")
+
+
+
+#US and NON USA - profit average
+plt5 <- ggplot(na.exclude(data.for.plot3))+
+  geom_bar(aes(x=cntry_us, y = profit_avg, fill = cntry_us), stat = "identity", width = 0.4) +
+  ylab("USD in millions") + xlab("")+
+  ggtitle("Average Profit by country")+
+  labs(fill = "Country")
+ 
+
+#US and Non USA- percent profit
+plt6 <- ggplot(na.exclude(data.for.plot1))+
+  geom_bar(aes(x=cntry_us, y = pct_proft_avg,fill = cntry_us), stat = "identity", width = 0.4) +
+  ylab("Profit%") + xlab("")+
+  ggtitle("Profit percentage by country")+
+  labs(fill = "Country")
+
+```
+
+
+```{r dataprocessing2, warning=FALSE}
+med_profit_pct <-  median(movieIMDB.dt[is_profit == 1,]$prft_pct_bdgt) 
+med_profit_pct
+#Profit comparison
+movieIMDB$high_profit <- ifelse(movieIMDB$prft_pct_bdgt > med_profit_pct, 1,0)
+profit.df <- movieIMDB[,c("is_profit", "high_profit","prft_pct_bdgt", "cntry_us")]
+profit.df
+```
+
+```{r NaiveBayes for probability of profit,warning=FALSE}
+set.seed(123)
+#Since NA values in profit are not useful for analysis I will drop them
+train.index <- createDataPartition(na.omit(profit.df$is_profit), 
+                                   p=0.8, 
+                                   list = FALSE)
+train.df <- profit.df[train.index,]
+test.df <- profit.df[-train.index,]
+#Naive Bayes
+movie_profit.nb <- naiveBayes(is_profit ~ cntry_us, data = train.df)
+
+movie_profit.nb
+```
+
+```{r NaiveBayes for probability of high profit,warning=FALSE}
+set.seed(123)
+#Since NA values in profit are not useful for analysis I will drop them
+
+train.index <- createDataPartition(na.omit(profit.df$high_profit), 
+                                   p=0.8, 
+                                   list = FALSE)
+train.df <- profit.df[train.index,]
+test.df <- profit.df[-train.index,]
+#Naive Bayes
+movie_hi_profit.nb <- naiveBayes(high_profit ~ cntry_us, data = train.df)
+movie_hi_profit.nb
+
+```
+```{r probability plot}
+
+    par(mfrow=c(2,1),mar=c(0.5, 0.5, 0.5, 0.5),cex.axis=1, cex.lab=2, cex.main=0.8, cex.sub=0.5)
+    nbplt1 <- plot(movie_profit.nb$tables$cntry_us,  
+    xlab = "Profitable",main ="Profit Probablity Plot" ,col= c("coral","cyan3"))
+    box("outer", col="black", lwd = 1)
+    
+    
+    nbplt2 <- plot(movie_hi_profit.nb$tables$cntry_us,
+    xlab = "Highly profitable",main = "High Profit Probablity Plot",col= c("coral","cyan3"))
+    box("outer", col="black", lwd = 1)
+   
+par(mfrow=c(1,1))
+```
+
+
+```{r tab2 - acor director profit,warning=FALSE}
+
+
+# Convert it to a matrix
+act.direct.df.all <- movieIMDB[,c("director_name","actor_1_name","profit","gross","budget")]
+
+act.direct.df.all$cnt <- 1
+
+#Converting budget in millions since profit is already calculated in millions
+act.direct.df.all$budget <- act.direct.df.all$budget/1000000
+
+act.direct.df1 <- act.direct.df.all %>% group_by(director_name,actor_1_name) %>% summarise(profit = sum(profit), budget =sum(budget), cnt=sum(cnt))
+
+
+act.direct.df1 <- na.omit(act.direct.df1)
+
+head(act.direct.df1,10)
+
+act.direct.df1$pct_profit <- round((act.direct.df1$profit/act.direct.df1$budget)*100)
+
+act.direct.df10 <- head(act.direct.df1[order(act.direct.df1$pct_profit,decreasing=TRUE, na.last=TRUE),], 12)
+
+act.direct.df10$indx <- paste( act.direct.df10$director_name, act.direct.df10$actor_1_name, sep="-")
+
+head(act.direct.df10,10) # The highest ROI generated by movie has a very low budget(under million ) but made profit in                            millions(The movie is 'Paranormal Activity'.The film cost roughly $15,000 to produce and                         earned $193 million for Paramount.
+```
+
+#Since there are a lot of actor, director names and movie titles, it would be difficult to incorporate in the model . I will assume that the facebook likes would represent their populatiry.The IMDB movie link is also not likely to contribute in score. Also the plot keywords would probably not influence the ratimg much.
+#Since I am considering the facebook likes of actors, I will add them up as main actors facebook likes.
+
+#I will use train from Caret package to determine important features
+
+```{r Feature Importance, warning=FALSE}
+###TAB 3
+movie.reg.df <- read_csv("movie_metadata.csv")
+
+
+movie.reg.df$actors_facbook_likes <-    movie.reg.df$actor_1_facebook_likes+
+ movie.reg.df$actor_2_facebook_likes+
+ movie.reg.df$actor_3_facebook_likes
+#"country",
+movie.reg.df <-  movie.reg.df[ ,!names(movie.reg.df) %in% c("movie_imdb_link","actor_1_name","actor_2_name","actor_3_name","director_name","movie_title","actor_1_facebook_likes","actor_2_facebook_likes","actor_3_facebook_likes","plot_keywords","content_rating","language","aspect_ratio", "genres","title_year")]
+
+movie.reg.df[!is.na(movie.reg.df),]
+dim( movie.reg.df)
+
+colnames(movie.reg.df)
+
+head(movie.reg.df,10)
+
+sum(is.na(movie.reg.df))
+
+
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+model <- caret::train(imdb_score~., data=as.data.frame(movie.reg.df), method="knn",preProcess="scale", trControl=control, na.action=na.omit)
+
+# estimatemodel variable importance
+#importance <- varImp(model, scale=FALSE)
+# summarize importance
+#print(importance)
+#ggplot(importance)+geom_col(fill="darkolivegreen")
+
+
+```
+
+
+```{r scatterplot -facebook likes and budget,warning=FALSE}
+###TAB 4
+
+movieFB <- movieIMDB[ ,names(movieIMDB) %in% c("budget","director_facebook_likes","actor_3_facebook_likes","actor_2_facebook_likes","actor_1_facebook_likes","cast_total_facebook_likes",
+"movie_facebook_likes","title_year")]
+head(movieFB)
+str(movieFB)
+apply(movieFB,2,function(x) sum(is.na(x)))
+
+movieFB.actor1 <- movieFB[,c("budget","actor_1_facebook_likes", "title_year")]
+movieFB.actor1$type <- "actor_1"
+names(movieFB.actor1) <- c("budget","facebook_likes", "year", "type")
+dim(movieFB.actor1)
+na.omit(movieFB.actor1)
+dim(movieFB.actor1)
+
+movieFB.actor2 <- movieFB[,c("budget","actor_2_facebook_likes", "title_year")]
+movieFB.actor2$type <- "actor_2"
+names(movieFB.actor2) <- c("budget","facebook_likes", "year", "type")
+na.omit(movieFB.actor2)
+dim(movieFB.actor2)
+
+movieFB.actor3 <- movieFB[,c("budget","actor_3_facebook_likes", "title_year")]
+movieFB.actor3$type <- "actor_3"
+names(movieFB.actor3) <- c("budget","facebook_likes", "year", "type")
+na.omit(movieFB.actor3)
+dim(movieFB.actor3)
+
+movieFB.movie <- movieFB[,c("budget","director_facebook_likes", "title_year")]
+movieFB.movie$type <- "director"
+names(movieFB.movie) <- c("budget","facebook_likes", "year", "type")
+na.omit(movieFB.movie)
+dim(movieFB.movie)
+#remove NA from movieFB
+
+data.for.plot.FB <- bind_rows(movieFB.actor1,movieFB.actor2,movieFB.actor3, movieFB.movie)
+na.omit(data.for.plot.FB)
+
+fbplt1 <- ggplot(na.omit(data.for.plot.FB), aes(budget/1000000, facebook_likes/1000)) +geom_line()+
+geom_point(aes(color = type)) +
+facet_wrap(vars(type)) +
+scale_x_continuous("Budget in million")+
+scale_y_continuous("Likes in thousands")+
+theme_bw() + labs(title="Scatterplot")
+
+# We can try to measure the relationship of facebook likes with 
+#per milllion of budget
+#The actor 3 variables does not have any visible correlation, I will add all the actor Facebook like together 
+movieFB$tot_actor_fb_likes <- movieFB$actor_1_facebook_likes+movieFB$actor_2_facebook_likes+movieFB$actor_3_facebook_likes
+
+
+#data.for.plot.post2004 <- movieFB[movieFB$title_year >= 2004,]
+
+#data.for.plot.time <- aggregate(.~title_year,data.for.plot.post2004, mean)
+
+#fbplt3 <- ggplot(data=movieFB, aes(x=budget/1000000, y=tot_actor_fb_likes, group=title_year, color=title_year)) +
+   # geom_line() +
+#    geom_point()
+#fbplt3 
+
+#fbplt4 <- ggplot(data=na.omit(movieFB), aes(x=budget/1000000, y=director_facebook_likes, group=title_year, color=title_year)) +  eom_point()
+
+```
+
+
+```{r shiny app, warning=FALSE}
+
+ui <- fluidPage(
+   #Title
+  titlePanel("IMDB Ratings-5000 movies"),
+  tabsetPanel(
+    tabPanel("Tab1", 
+              sidebarLayout(position = "left",
+                               sidebarPanel(width="3", 
+                                tags$style(type='text/css', ".selectize-input { font-size: 14px; line-height:
+                                           14px;} .selectize-dropdown { font-size: 14px; line-height:
+                                           14px;}"),
+                            verticalLayout(
+                                                radioButtons("plt", label = h6("Select comparison type:"),
+                                                          c("Country Wise" = "cntry",
+                                                             "USA vs Non USA" = "usvsnon"), selected="cntry"),
+                                                 selectInput("selectvar", label = h6("Select Y axis"),
+                                                          choices = list("Gross","Profit","ROI"), selected = "ROI" )
+                                                ),
+                            textOutput("tab1side"),
+                                 tags$style("#tab1side{color: black;
+                                 font-size: 8px;
+                                }"
+                )),
+                          mainPanel(width="9",
+                                splitLayout(cellWidths =  c("75%", "25%"),
+                                            plotOutput("proflocplot") %>% withSpinner(color="coral"),
+                                            verticalLayout(
+                                                      plotOutput("nbplot")
+                                                     
+                                   )),
+                                 verbatimTextOutput("tab1text"),
+                                 tags$style("#tab1text{color: black;
+                                 font-size: 12px;
+                                 font-style: italic;
+                                }"),
+                            verbatimTextOutput("tab1text2"),
+                                 tags$style("#tab1text2{color: black;
+                                 font-size: 12px;
+                                 font-style: italic;
+                                }"
+                )
+              )
+              )
+        ),
+      tabPanel("Tab2",  
+               sidebarLayout(position = "left",
+                               sidebarPanel(width="3", 
+                                tags$style(type='text/css', ".selectize-input { font-size: 14px; line-height:
+                                           14px;} .selectize-dropdown { font-size: 14px; line-height:
+                                           14px;}"),
+                                verticalLayout(
+                                                radioButtons("display", label = h6("Select comparison type:"),
+                                                          c("Top 10" = "top10",
+                                                             "Top 10 for actor" = "top10act",
+                                                             "Top 10 for director" = "top10direct"),
+                                                          selected="top10"),
+                                                 selectInput("selectact", label = h6("Select actor"),
+                                                          choices = act.direct.df1$actor_1_name,selected=1),
+                                                 selectInput("selectdir", label = h6("Select director"),
+                                                          choices = act.direct.df1$director_name,selected=1 )
+                                                )),
+                          mainPanel(width="8",
+                                    plotOutput("actordirecttop10") %>% withSpinner(color="green"), 
+                                    verbatimTextOutput("tab2text"),
+                                     tags$style("#tab2text{color: black;
+                                 font-size: 12px;
+                                 font-style: italic;
+                                }"
+                      ))
+              )
+           ),
+      tabPanel("Tab3",
+      mainPanel(label=h4("Which fetures are most important predicting rating?"),width="8",position = "right",
+         plotOutput("impplot") %>% withSpinner(color="brown") 
+         
+      ),
+      textOutput("tab3text"),
+          tags$style("#tab3text{color: black;
+                                 font-size: 12px;
+                                 font-style: italic;
+                                }"
+         )),
+      tabPanel("Tab4", 
+               sidebarPanel(width="3",
+                            tags$style(type='text/css', ".selectize-input { font-size: 14px; line-height:
+                                           14px;} .selectize-dropdown { font-size: 14px; line-height:
+                                           14px;}"),
+                            radioButtons("plottype", "Select comparison type:",
+                                               c("Facebook Likes vs Budget" = "fbvsbud",
+                                                "Facebook Likes vs Budget- Over the years" = "fbvsbudyr"),
+                                                selected="fbvsbud"),
+                            selectInput("selectliketype", label = h6("Select Y axis"),
+                                        choices = list("Director Facebook Likes"="director_facebook_likes", 
+                                                       "Actor Facebook Likes"="tot_actor_fb_likes"))),
+                mainPanel(width="6",       
+                                plotOutput("fbplot") %>% withSpinner(color="darkblue"),
+                          verbatimTextOutput("tab4text"),
+                           tags$style("#tab4text{color: black;
+                                 font-size: 12px;
+                                 font-style: italic;
+                                }"
+         )))
+      )
+    
+  )
+
+#Server functions
+server <- function(input, output) {
+  
+  plotlocandprofit <- reactive({
+    if("cntry"  %in% input$plt) {
+      if ( "Gross" %in% input$selectvar) return(plt1)
+      if ( "Profit" %in% input$selectvar) return(plt2)
+      if( "ROI" %in% input$selectvar) return(plt3) 
+    }
+    if("usvsnon"  %in% input$plt) {
+      if ( "Gross" %in% input$selectvar) return(plt4)
+      if ( "Profit" %in% input$selectvar) return(plt5)
+      if ("ROI" %in% input$selectvar) return(plt6) 
+    }
+  })
+  
+  output$proflocplot <- renderPlot({
+   
+     dataplots <-  plotlocandprofit()
+     print(dataplots)
+  }) 
+  
+  output$nbplot <- renderPlot({
+    
+    par(mfrow=c(2,1),mar=c(0.5, 0.5, 0.5, 0.5),cex.axis=1, cex.lab=2, cex.main=0.8, cex.sub=0.5)
+    
+    nbplt1 <- plot(movie_profit.nb$tables$cntry_us, 
+    xlab = "Profitable",main = "Profit Probablity Plot",col= c("coral","cyan3"))
+    box("outer", col="black", lwd = 1)
+    print(nbplt1)
+    
+    nbplt2 <- plot(movie_hi_profit.nb$tables$cntry_us,
+    xlab = "Highly profitable", main = "High Profit Probablity Plot",col= c("coral","cyan3"))
+    box("outer", col="black", lwd = 1)
+    print(nbplt2)
+    par(mfrow = c(1, 1))
+    
+  })
+  
+   output$probplot <- renderPlot({
+    
+     par(mfrow=c(2,1),mar=c(0.3, 0.3, 0.3, 0.3))
+     
+    slices <- c(movie_profit.nb$tables$cntry_us[4],movie_profit.nb$tables$cntry_us[2])
+    lbls <- c("US", "Non USA")
+    pie1 <- pie(slices, labels = c("US", "Non USA"),radius = 0.5, main="profit",font=1, cex.main=1, col= c("cyan4","darksalmon"))
+    box("outer", col="black", lwd = 1)
+    print(pie1)
+    
+    slices <- c(movie_hi_profit.nb$tables$cntry_us[4],movie_hi_profit.nb$tables$cntry_us[2])
+   lbls <- c("US", "Non USA")
+    pie2 <- pie(slices, labels = c("US", "Non USA"),radius = 0.5,font=1, 
+                main="Above average profit",cex.main=1, col= c("cyan4","darksalmon"))
+    box("outer", col="black", lwd = 1)
+    print(pie2)
+    
+    par(mfrow = c(1, 1))
+    
+  })
+   
+   
+   dataforactprofit <- reactive({
+      if("top10"  %in% input$display) {
+        data.for.top10plot <- act.direct.df10
+        data.for.top10plot <- transform(data.for.top10plot, indx = reorder(indx, -pct_profit))
+        return( data.for.top10plot) 
+      }
+      if("top10act"  %in% input$display) {
+       
+        data.for.top10act <- act.direct.df1[act.direct.df1$actor_1_name == input$selectact,]
+        data.for.top10act$indx <- data.for.top10act$director_name
+        data.for.top10plot <- head(data.for.top10act[order(data.for.top10act$pct_profit,decreasing=TRUE,
+                                                           na.last=TRUE),], 12)  
+        data.for.top10plot <- transform(data.for.top10plot, indx = reorder(indx, -pct_profit))
+        return( data.for.top10plot) 
+      }
+     if("top10direct"  %in% input$display) {
+      
+        data.for.top10dir <- act.direct.df1[act.direct.df1$director_name == input$selectdir,]
+        data.for.top10dir$indx <- data.for.top10dir$actor_1_name
+        data.for.top10plot  <- head(data.for.top10dir[order(data.for.top10dir$pct_profit,decreasing=TRUE,
+                                                            na.last=TRUE),], 12) 
+        data.for.top10plot <- transform(data.for.top10plot, indx = reorder(indx, -pct_profit))
+         return( data.for.top10plot) 
+      }
+  })
+   
+   ####TAB 2 - Actor Director combo
+   output$actordirecttop10 <- renderPlot({
+     
+        datafortab2 <- dataforactprofit()
+       #datafortab2 <- movieFB 
+         
+        plt10 <- ggplot(datafortab2)+
+                  geom_col(aes(x=datafortab2$indx, y= datafortab2$pct_profit) , width = 0.3, 
+                   fill="darkolivegreen")+
+                  xlab(" ")+
+                  ylab("ROI - profit as%budget" )+
+                  geom_text(aes(x=datafortab2$indx, y= datafortab2$pct_profit,label = datafortab2$pct_profit), vjust = -0.5)+
+                  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+      
+        print(plt10)
+  })
+   
+   ### TAB 4
+   plotforfblikes <- reactive({
+      if("fbvsbud"  %in% input$plottype) {
+        fbplt1 <- ggplot(na.omit(data.for.plot.FB), aes(budget/1000000, facebook_likes/10000)) +geom_line()+
+                geom_point(aes(color = type)) +
+                facet_wrap(vars(type)) +
+                scale_x_continuous("Budget in million")+
+                scale_y_continuous("Likes in thousands")+
+                theme_bw() + labs(title="Does facebook likes of actor/directors depends on budget?", 
+                                  color="Facebook likes of")
+        return( fbplt1) 
+      }
+      if("fbvsbudyr"  %in% input$plottype) {
+             
+           if("director_facebook_likes"  %in% input$selectliketype) {
+                fbplt2 <- ggplot(data=movieFB, aes(x=budget/1000000, y=director_facebook_likes/1000, group=title_year,                           color=title_year)) +
+                      scale_x_continuous("Budget in million")+
+                      scale_y_continuous("Likes in thousands")+
+                  labs(title="Does facebook likes of directors vs budget change over years?",color="Year")+
+                       # geom_line() +
+                        geom_point()
+               
+            }
+           if("tot_actor_fb_likes"  %in% input$selectliketype) {
+                fbplt2 <- ggplot(data=movieFB, aes(x=budget/1000000, y=tot_actor_fb_likes/1000, group=title_year,                         color=title_year)) +
+                      scale_x_continuous("Budget in million")+
+                      scale_y_continuous("Likes in thousands")+
+                  labs(title="Does facebook likes of actors vs budget change over years?", color="Year")+
+                        geom_point()
+               
+            }
+
+        return( fbplt2) 
+      }
+     
+  }) 
+   
+  output$fbplot <- renderPlot ({
+       
+        fbplt <-  plotforfblikes()
+        print(fbplt)
+
+  }) 
+  
+   ### TAB 3
+  output$impplot <- renderPlot({
+    
+     
+      importance <- varImp(model, scale=FALSE)
+      # visualize importance
+      impplt <- ggplot(importance)+geom_col(fill="brown", width=0.7)
+       
+      print(impplt)
+  })
+  
+  output$tab1side <- renderText({
+    
+     side1 <- "#Profit calculated as (Gross - Budget)\n
+               #ROI calculated as (Profit/Budget)*100"
+     print(side1)
+  })
+  
+   output$tab1text <- renderText({
+    
+     text1 <- " "
+     if("cntry"  %in% input$plt) {
+        text1 <- "Here we see how the gross earning/profit/ROI from the movies varies depending on countries.\n.ROI is being used to measure profitability for a movie for this analysis.\nROI plots show USA is the best location to produce movies compared to any other countries available in the dataset. "
+    }
+    if("usvsnon"  %in% input$plt) {
+        text1 <- "Here we see how the gross earning/profit/ROI from the movies varies depending h.\n.ROI is ether it was produced in USA or outside.\nROI plots show USA is the best location to produce movies compared to outside of it."
+    }
+  
+    print(text1)
+    
+  })
+   
+   output$tab1text2 <- renderText({
+     
+    us.prob <- round(movie_profit.nb$tables$cntry_us[2],2)
+    non.us.prob <- round(movie_profit.nb$tables$cntry_us[4],2)
+    
+    us.hi.prob <- round(movie_hi_profit.nb$tables$cntry_us[2],2)
+    non.us.hi.prob <- round(movie_hi_profit.nb$tables$cntry_us[4],2)
+      
+      
+    paste0("The number of movies made is USA compared is 3808 as compared to 1232 made outside.\nThe NaiveBayes probability plot shows the probability of a movie being profitable or \nhighly profitable(above average profit) in US compared Non US coutries.Movies have ",us.prob," probability of being profitable as compared to\n",non.us.prob," if produced in USA.")
+    
+    
+  })
+  
+  output$tab3text <- renderText({
+    
+  
+    text3 <- "Here, the plot shows which features are most important for predicting IMDB rating.Using a knn model
+                for feature, Facebook likes of a movie is the most important feature followed by gross
+                earning,number of user the movie was reviewed by, director Facebook likes, budget,
+              duration etc."
+    print(text3)
+    
+  })
+  
+   output$tab2text <- renderText({
+      
+    text2 <- "Select 'Top 10' shows top director-actor combinations(over one or multiple\n movies) which gave highest return on investment.\nThe names are in Director name- Actor name format.\nThe combination which made highest profit or returns is the cast from only one movie 'Paranormal Activity'.\nThis film cost roughly $15,000 to produce and earned $193 million for Paramount(according to Forbes).\nWe can also view top 10 ROIs the movies for any actor or director.\n*Only actor_1 feature is considered for this comparison."
+    print(text2)
+    
+  })
+   
+   output$tab4text <- renderText({
+     
+     text4 <- " "
+     
+     if("fbvsbud"  %in% input$plottype) {
+      text4 <- "The Facebook likes do not seem to depend on budget of the movie.\nInterestingly low budget movies have more facebook likes than higher budget movies.\nThere are also a few outliers in terms of budget like 'Avatar' which have much fewer Facebook likes than lower budget movies"
+    }
+     
+     if("fbvsbudyr"  %in% input$plottype) {
+      text4 <- "The Facebook Likes vs Budget plot has observation colored based on years.\nMovies from earlier years seems to have more Facebook likes for low budget movies.\nThis trend did not change over time as we see \nlow budget movies having more likes in recent years too."
+
+    }
+     print(text4)
+    
+  })
+   
+}
+
+# Create a Shiny app object
+shinyApp(ui = ui, server = server)
+
+```
